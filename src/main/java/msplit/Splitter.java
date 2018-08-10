@@ -1,5 +1,6 @@
 package msplit;
 
+import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.*;
 
@@ -63,8 +64,6 @@ public class Splitter implements Iterable<SplitPoint> {
 
       InsnTraverseInfo info = new InsnTraverseInfo();
       info.startIndex = currIndex;
-      info.currIndex = currIndex;
-      info.currNode = insns[info.currIndex];
       info.endIndex = Math.min(currIndex + config.maxSize - 1, insns.length - 1);
 
       // Reduce the end based on try/catch blocks the start is in or that jump to
@@ -75,6 +74,9 @@ public class Splitter implements Iterable<SplitPoint> {
       constrainEndByExternalJumps(info);
       // Make sure we didn't reduce the end too far
       if (info.getSize() < config.minSize) return null;
+
+      // Now that we have our largest range from the start index, we can go over each updating the local refs and stack
+      // For the stack, we are going to use the
       // TODO: go over each affecting the stack and local refs
       // TODO: final checks - can't be jumped into from outside!
       return null;
@@ -156,26 +158,67 @@ public class Splitter implements Iterable<SplitPoint> {
       }
     }
 
+    public void splitPointFromInfo(InsnTraverseInfo info) {
+      // We're going to use the analyzer adapter and run it for the up until the end, a step at a time
+      StackAndLocalTrackingAdapter adapter = new StackAndLocalTrackingAdapter(config);
+      // Visit all of the insns up our start.
+      // XXX: I checked the source of AnalyzerAdapter to confirm I don't need any of the surrounding stuff
+      for (int i = 0; i < info.startIndex; i++) insns[i].accept(adapter);
+      // Take the stack at the start and copy it off
+      Object[] stackAtStart = adapter.stack.toArray();
+      // Reset some adapter state
+      adapter.lowestStackSize = stackAtStart.length;
+      adapter.localsRead.clear();
+      adapter.localsWritten.clear();
+      // Now go over the remaining range
+      for (int i = info.startIndex; i <= info.endIndex; i++) insns[i].accept(adapter);
+      // Build the split point
+    }
+
     public static class InsnTraverseInfo {
       public int startIndex;
-      public int currIndex;
-      public AbstractInsnNode currNode;
       // Can only shrink, never increase in size
       public int endIndex;
-      public final Set<Integer> localsReferenced = new TreeSet<>();
-      public final List<Type> stackNeededAtStart = new ArrayList<>();
-      public final List<Type> stack = new ArrayList<>();
 
       public int getSize() { return endIndex - startIndex + 1; }
+    }
+
+    public static class StackAndLocalTrackingAdapter extends AnalyzerAdapter {
+      public int lowestStackSize = 0;
+      public final Set<Integer> localsRead = new TreeSet<>();
+      public final Set<Integer> localsWritten = new TreeSet<>();
+
+      protected StackAndLocalTrackingAdapter(Config config) {
+        super(config.api, config.owner, config.method.access, config.method.name, config.method.desc, null);
+      }
+
+      @Override
+      protected void onPop() { lowestStackSize = Math.min(lowestStackSize, stack.size() - 1); }
+
+      @Override
+      protected Object get(int local) {
+        localsRead.add(local);
+        return super.get(local);
+      }
+
+      @Override
+      protected void set(int local, Object type) {
+        localsWritten.add(local);
+        super.set(local, type);
+      }
     }
   }
 
   public static class Config {
+    public final int api;
+    public final String owner;
     public final MethodNode method;
     public final int minSize;
     public final int maxSize;
 
-    public Config(MethodNode method, int minSize, int maxSize) {
+    public Config(int api, String owner, MethodNode method, int minSize, int maxSize) {
+      this.api = api;
+      this.owner = owner;
       this.method = method;
       this.minSize = minSize;
       this.maxSize = maxSize;
