@@ -3,6 +3,7 @@ package msplit;
 
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
 import java.util.ArrayList;
@@ -41,16 +42,20 @@ public class SplitMethod {
   public Result fromSplitPoint(MethodNode method, Splitter.SplitPoint splitPoint) {
     // The new method is a static synthetic method named method.name + "$split" that returns an object array
     // Key is previous local index, value is new local index
-    Map<Integer, Integer> localsMap = new HashMap<>();
+    Map<Integer, Integer> localsReadMap = new HashMap<>();
+    // Key is previous local index, value is new local index in object array
+    Map<Integer, Integer> localsWrittenMap = new HashMap<>();
     // The new method's parameters are all stack items + all read locals
     List<Type> args = new ArrayList<>(splitPoint.neededFromStackAtStart);
     for (int localRead : splitPoint.localsRead) {
       // Add the arg
       args.add(Type.getType(method.localVariables.get(localRead).desc));
       // Add the local map
-      localsMap.put(localRead, args.size() - 1);
+      localsReadMap.put(localRead, args.size() - 1);
     }
     // Create the new instructions...
+    List<AbstractInsnNode> insns = new ArrayList<>();
+    // First instruction is creating the return which is locals written
 
     MethodNode newMethod = new MethodNode(api, Opcodes.ACC_PRIVATE & Opcodes.ACC_SYNTHETIC, method.name + "$split",
         Type.getMethodDescriptor(Type.getType("[Ljava/lang/Object;"), args.toArray(new Type[0])), null, null);

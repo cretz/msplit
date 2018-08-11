@@ -45,13 +45,28 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
     }
   }
 
+  protected int compareInsnIndexes(AbstractInsnNode o1, AbstractInsnNode o2) {
+    return Integer.compare(method.instructions.indexOf(o1), method.instructions.indexOf(o2));
+  }
+
   protected class Iter implements Iterator<SplitPoint> {
     protected final AbstractInsnNode[] insns;
+    protected final List<TryCatchBlockNode> tryCatchBlocks;
     protected int currIndex = -1;
     protected boolean peeked;
     protected SplitPoint peekedValue;
 
-    protected Iter() { insns = method.instructions.toArray(); }
+    protected Iter() {
+      insns = method.instructions.toArray();
+      tryCatchBlocks = new ArrayList<>(method.tryCatchBlocks);
+      // Must be sorted by earliest starting index then earliest end index then earliest handler
+      tryCatchBlocks.sort((o1, o2) -> {
+        int cmp = compareInsnIndexes(o1.start, o2.start);
+        if (cmp == 0) compareInsnIndexes(o1.end, o2.end);
+        if (cmp == 0) compareInsnIndexes(o1.handler, o2.handler);
+        return cmp;
+      });
+    }
 
     @Override
     public boolean hasNext() {
@@ -106,10 +121,43 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
     }
 
     protected void constrainEndByTryCatchBlocks(InsnTraverseInfo info) {
-      // If there are try blocks that the start is in, we can only go to the earliest block end
-      for (TryCatchBlockNode block : method.tryCatchBlocks) {
-        // No matter what, for now, we don't include catch handling
+      // Go over all the try/catch blocks, sorted by earliest
+      for (TryCatchBlockNode block : tryCatchBlocks) {
         int handleIndex = method.instructions.indexOf(block.handler);
+        int startIndex = method.instructions.indexOf(block.start);
+        int endIndex = method.instructions.indexOf(block.end) - 1;
+        boolean catchWithinDisallowed;
+
+        if (info.startIndex <= startIndex && info.endIndex >= endIndex) {
+          // The try block is entirely inside the range...
+          catchWithinDisallowed = false;
+          // Since it's entirely within, we need the catch handler within too
+          if (handleIndex < info.startIndex || handleIndex > info.endIndex) {
+            // Well, it's not within, so that means we can't include this try block at all
+            info.endIndex = Math.min(info.endIndex, startIndex - 1);
+          }
+        } else if (info.startIndex > startIndex && info.endIndex > endIndex) {
+          // The try block started before this range, but ends inside of it...
+          // The end has to be changed to the block's end so it doesn't go over the boundary
+          info.endIndex = Math.min(info.endIndex, endIndex);
+          // The catch can't jump in here
+          catchWithinDisallowed = true;
+        } else if (info.startIndex <= startIndex && info.endIndex < endIndex) {
+          // The try block started in this range, but ends outside of it...
+          // Can't have the block then, reduce it to before the start
+          info.endIndex = Math.min(info.endIndex, startIndex - 1);
+          // Since we don't have the block, we can't jump in here either
+          catchWithinDisallowed = true;
+        } else {
+          // The try block is completely outside, just restrict the catch from jumping in
+          catchWithinDisallowed = true;
+        }
+        // If the catch is within and not allowed to be, we have to change the end to before it
+        if (catchWithinDisallowed && info.startIndex <= handleIndex && info.endIndex >= handleIndex) {
+          info.endIndex = Math.min(info.endIndex, handleIndex - 1);
+        }
+        /*
+        TODO: this is what we used to do...
         if (info.startIndex < handleIndex) info.endIndex = Math.min(info.endIndex, handleIndex);
         // Now we can check the try-block range
         int start = method.instructions.indexOf(block.start);
@@ -117,6 +165,7 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
         int end = method.instructions.indexOf(block.end);
         if (info.startIndex >= end) continue;
         info.endIndex = Math.min(info.endIndex, end - 1);
+        */
       }
     }
 
