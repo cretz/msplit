@@ -1,30 +1,34 @@
 package msplit;
 
-import org.objectweb.asm.MethodVisitor;
-import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.*;
 
 import java.util.*;
 
 public class Splitter implements Iterable<SplitPoint> {
-  public final Config config;
+  protected final int api;
+  protected final String owner;
+  protected final MethodNode method;
+  protected final int minSize;
+  protected final int maxSize;
 
-  public Splitter(Config config) { this.config = config; }
+  public Splitter(int api, String owner, MethodNode method, int minSize, int maxSize) {
+    this.api = api;
+    this.owner = owner;
+    this.method = method;
+    this.minSize = minSize;
+    this.maxSize = maxSize;
+  }
 
   @Override
-  public Iterator<SplitPoint> iterator() { return new Iter(config); }
+  public Iterator<SplitPoint> iterator() { return new Iter(); }
 
-  protected static class Iter implements Iterator<SplitPoint> {
-    protected final Config config;
+  protected class Iter implements Iterator<SplitPoint> {
     protected final AbstractInsnNode[] insns;
     protected int currIndex = -1;
     protected boolean peeked;
     protected SplitPoint peekedValue;
 
-    public Iter(Config config) {
-      this.config = config;
-      this.insns = config.method.instructions.toArray();
-    }
+    public Iter() { insns = method.instructions.toArray(); }
 
     @Override
     public boolean hasNext() {
@@ -51,7 +55,7 @@ public class Splitter implements Iterable<SplitPoint> {
 
     public SplitPoint nextOrNull() {
       // Try for each index
-      while (++currIndex + config.minSize <= insns.length) {
+      while (++currIndex + minSize <= insns.length) {
         SplitPoint longest = longestForCurrIndex();
         if (longest != null) return longest;
       }
@@ -61,11 +65,10 @@ public class Splitter implements Iterable<SplitPoint> {
     public SplitPoint longestForCurrIndex() {
       // As a special case, if the previous insn was a line number, that was good enough
       if (currIndex - 1 >- 0 && insns[currIndex - 1] instanceof LineNumberNode) return null;
-
+      // Build the info object
       InsnTraverseInfo info = new InsnTraverseInfo();
       info.startIndex = currIndex;
-      info.endIndex = Math.min(currIndex + config.maxSize - 1, insns.length - 1);
-
+      info.endIndex = Math.min(currIndex + maxSize - 1, insns.length - 1);
       // Reduce the end based on try/catch blocks the start is in or that jump to
       constrainEndByTryCatchBlocks(info);
       // Reduce the end based on any jumps within
@@ -73,25 +76,22 @@ public class Splitter implements Iterable<SplitPoint> {
       // Reduce the end based on any jumps into
       constrainEndByExternalJumps(info);
       // Make sure we didn't reduce the end too far
-      if (info.getSize() < config.minSize) return null;
-
+      if (info.getSize() < minSize) return null;
       // Now that we have our largest range from the start index, we can go over each updating the local refs and stack
       // For the stack, we are going to use the
-      // TODO: go over each affecting the stack and local refs
-      // TODO: final checks - can't be jumped into from outside!
-      return null;
+      return splitPointFromInfo(info);
     }
 
     public void constrainEndByTryCatchBlocks(InsnTraverseInfo info) {
       // If there are try blocks that the start is in, we can only go to the earliest block end
-      for (TryCatchBlockNode block : config.method.tryCatchBlocks) {
+      for (TryCatchBlockNode block : method.tryCatchBlocks) {
         // No matter what, for now, we don't include catch handling
-        int handleIndex = config.method.instructions.indexOf(block.handler);
+        int handleIndex = method.instructions.indexOf(block.handler);
         if (info.startIndex < handleIndex) info.endIndex = Math.min(info.endIndex, handleIndex);
         // Now we can check the try-block range
-        int start = config.method.instructions.indexOf(block.start);
+        int start = method.instructions.indexOf(block.start);
         if (info.startIndex < start) continue;
-        int end = config.method.instructions.indexOf(block.end);
+        int end = method.instructions.indexOf(block.end);
         if (info.startIndex >= end) continue;
         info.endIndex = Math.min(info.endIndex, end - 1);
       }
@@ -104,21 +104,21 @@ public class Splitter implements Iterable<SplitPoint> {
         int earliestIndex;
         int furthestIndex;
         if (node instanceof JumpInsnNode) {
-          earliestIndex = config.method.instructions.indexOf(((JumpInsnNode) node).label);
+          earliestIndex = method.instructions.indexOf(((JumpInsnNode) node).label);
           furthestIndex = earliestIndex;
         } else if (node instanceof TableSwitchInsnNode) {
-          earliestIndex = config.method.instructions.indexOf(((TableSwitchInsnNode) node).dflt);
+          earliestIndex = method.instructions.indexOf(((TableSwitchInsnNode) node).dflt);
           furthestIndex = earliestIndex;
           for (LabelNode label : ((TableSwitchInsnNode) node).labels) {
-            int index = config.method.instructions.indexOf(label);
+            int index = method.instructions.indexOf(label);
             earliestIndex = Math.min(earliestIndex, index);
             furthestIndex = Math.max(furthestIndex, index);
           }
         } else if (node instanceof LookupSwitchInsnNode) {
-          earliestIndex = config.method.instructions.indexOf(((LookupSwitchInsnNode) node).dflt);
+          earliestIndex = method.instructions.indexOf(((LookupSwitchInsnNode) node).dflt);
           furthestIndex = earliestIndex;
           for (LabelNode label : ((LookupSwitchInsnNode) node).labels) {
-            int index = config.method.instructions.indexOf(label);
+            int index = method.instructions.indexOf(label);
             earliestIndex = Math.min(earliestIndex, index);
             furthestIndex = Math.max(furthestIndex, index);
           }
@@ -138,29 +138,29 @@ public class Splitter implements Iterable<SplitPoint> {
         if (i >= info.startIndex && i <= info.endIndex) continue;
         AbstractInsnNode node = insns[i];
         if (node instanceof JumpInsnNode) {
-          int index = config.method.instructions.indexOf(((JumpInsnNode) node).label);
+          int index = method.instructions.indexOf(((JumpInsnNode) node).label);
           if (index >= info.startIndex) info.endIndex = Math.min(info.endIndex, index - 1);
         } else if (node instanceof TableSwitchInsnNode) {
-          int index = config.method.instructions.indexOf(((TableSwitchInsnNode) node).dflt);
+          int index = method.instructions.indexOf(((TableSwitchInsnNode) node).dflt);
           if (index >= info.startIndex) info.endIndex = Math.min(info.endIndex, index - 1);
           for (LabelNode label : ((TableSwitchInsnNode) node).labels) {
-            index = config.method.instructions.indexOf(label);
+            index = method.instructions.indexOf(label);
             if (index >= info.startIndex) info.endIndex = Math.min(info.endIndex, index - 1);
           }
         } else if (node instanceof LookupSwitchInsnNode) {
-          int index = config.method.instructions.indexOf(((LookupSwitchInsnNode) node).dflt);
+          int index = method.instructions.indexOf(((LookupSwitchInsnNode) node).dflt);
           if (index >= info.startIndex) info.endIndex = Math.min(info.endIndex, index - 1);
           for (LabelNode label : ((LookupSwitchInsnNode) node).labels) {
-            index = config.method.instructions.indexOf(label);
+            index = method.instructions.indexOf(label);
             if (index >= info.startIndex) info.endIndex = Math.min(info.endIndex, index - 1);
           }
         }
       }
     }
 
-    public void splitPointFromInfo(InsnTraverseInfo info) {
+    public SplitPoint splitPointFromInfo(InsnTraverseInfo info) {
       // We're going to use the analyzer adapter and run it for the up until the end, a step at a time
-      StackAndLocalTrackingAdapter adapter = new StackAndLocalTrackingAdapter(config);
+      StackAndLocalTrackingAdapter adapter = new StackAndLocalTrackingAdapter(Splitter.this);
       // Visit all of the insns up our start.
       // XXX: I checked the source of AnalyzerAdapter to confirm I don't need any of the surrounding stuff
       for (int i = 0; i < info.startIndex; i++) insns[i].accept(adapter);
@@ -173,55 +173,48 @@ public class Splitter implements Iterable<SplitPoint> {
       // Now go over the remaining range
       for (int i = info.startIndex; i <= info.endIndex; i++) insns[i].accept(adapter);
       // Build the split point
-    }
-
-    public static class InsnTraverseInfo {
-      public int startIndex;
-      // Can only shrink, never increase in size
-      public int endIndex;
-
-      public int getSize() { return endIndex - startIndex + 1; }
-    }
-
-    public static class StackAndLocalTrackingAdapter extends AnalyzerAdapter {
-      public int lowestStackSize = 0;
-      public final Set<Integer> localsRead = new TreeSet<>();
-      public final Set<Integer> localsWritten = new TreeSet<>();
-
-      protected StackAndLocalTrackingAdapter(Config config) {
-        super(config.api, config.owner, config.method.access, config.method.name, config.method.desc, null);
-      }
-
-      @Override
-      protected void onPop() { lowestStackSize = Math.min(lowestStackSize, stack.size() - 1); }
-
-      @Override
-      protected Object get(int local) {
-        localsRead.add(local);
-        return super.get(local);
-      }
-
-      @Override
-      protected void set(int local, Object type) {
-        localsWritten.add(local);
-        super.set(local, type);
-      }
+      return new SplitPoint(
+          adapter.localsRead.stream().mapToInt(i -> i).toArray(),
+          adapter.localsWritten.stream().mapToInt(i -> i).toArray(),
+          Arrays.copyOfRange(stackAtStart, adapter.lowestStackSize, stackAtStart.length),
+          Arrays.copyOfRange(adapter.stack.toArray(), adapter.lowestStackSize, adapter.stack.size()),
+          info.startIndex,
+          info.getSize()
+      );
     }
   }
 
-  public static class Config {
-    public final int api;
-    public final String owner;
-    public final MethodNode method;
-    public final int minSize;
-    public final int maxSize;
+  protected static class StackAndLocalTrackingAdapter extends AnalyzerAdapter {
+    public int lowestStackSize = 0;
+    public final Set<Integer> localsRead = new TreeSet<>();
+    public final Set<Integer> localsWritten = new TreeSet<>();
 
-    public Config(int api, String owner, MethodNode method, int minSize, int maxSize) {
-      this.api = api;
-      this.owner = owner;
-      this.method = method;
-      this.minSize = minSize;
-      this.maxSize = maxSize;
+    protected StackAndLocalTrackingAdapter(Splitter splitter) {
+      super(splitter.api, splitter.owner, splitter.method.access, splitter.method.name, splitter.method.desc, null);
     }
+
+    @Override
+    protected void onPop() { lowestStackSize = Math.min(lowestStackSize, stack.size() - 1); }
+
+    @Override
+    protected Object get(int local) {
+      localsRead.add(local);
+      return super.get(local);
+    }
+
+    @Override
+    protected void set(int local, Object type) {
+      localsWritten.add(local);
+      super.set(local, type);
+    }
+  }
+
+
+  protected static class InsnTraverseInfo {
+    public int startIndex;
+    // Can only shrink, never increase in size
+    public int endIndex;
+
+    public int getSize() { return endIndex - startIndex + 1; }
   }
 }

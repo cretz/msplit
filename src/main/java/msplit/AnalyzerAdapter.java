@@ -46,8 +46,8 @@ import java.util.Map;
  * table attributes (i.e., pre Java 6 classes) then this adapter may not be able to compute the
  * stack map frame for each instruction. In this case no exception is thrown but the {@link #locals}
  * and {@link #stack} fields will be null for these instructions.
- *
- * NOTE: This was altered from the original to add onPopped and make get/set protected
+ * <p>
+ * NOTE: This was altered for msplit from the original to add onPopped and make get/set protected.
  *
  * @author Eric Bruneton
  */
