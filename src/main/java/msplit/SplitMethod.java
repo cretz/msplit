@@ -4,12 +4,11 @@ package msplit;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public class SplitMethod {
 
@@ -42,23 +41,49 @@ public class SplitMethod {
   public Result fromSplitPoint(MethodNode method, Splitter.SplitPoint splitPoint) {
     // The new method is a static synthetic method named method.name + "$split" that returns an object array
     // Key is previous local index, value is new local index
-    Map<Integer, Integer> localsReadMap = new HashMap<>();
-    // Key is previous local index, value is new local index in object array
-    Map<Integer, Integer> localsWrittenMap = new HashMap<>();
+    Map<Integer, Integer> localsMap = new HashMap<>();
     // The new method's parameters are all stack items + all read locals
     List<Type> args = new ArrayList<>(splitPoint.neededFromStackAtStart);
-    for (int localRead : splitPoint.localsRead) {
-      // Add the arg
-      args.add(Type.getType(method.localVariables.get(localRead).desc));
-      // Add the local map
-      localsReadMap.put(localRead, args.size() - 1);
-    }
-    // Create the new instructions...
-    List<AbstractInsnNode> insns = new ArrayList<>();
-    // First instruction is creating the return which is locals written
-
-    MethodNode newMethod = new MethodNode(api, Opcodes.ACC_PRIVATE & Opcodes.ACC_SYNTHETIC, method.name + "$split",
+    splitPoint.localsRead.forEach((index, type) -> {
+      args.add(type);
+      localsMap.put(index, args.size() - 1);
+    });
+    // Create the new method
+    MethodNode newMethod = new MethodNode(api,
+        Opcodes.ACC_STATIC & Opcodes.ACC_PRIVATE & Opcodes.ACC_SYNTHETIC, method.name + "$split",
         Type.getMethodDescriptor(Type.getType("[Ljava/lang/Object;"), args.toArray(new Type[0])), null, null);
+    // Add the written locals to the map that are not already there
+    int newLocalIndex = args.size();
+    for (Integer key : splitPoint.localsWritten.keySet()) {
+      if (!localsMap.containsKey(key)) {
+        localsMap.put(key, newLocalIndex);
+        newLocalIndex++;
+      }
+    }
+    // First set of instructions is pushing the new stack from the params
+    for (int i = 0; i < splitPoint.neededFromStackAtStart.size(); i++) {
+      Type item = splitPoint.neededFromStackAtStart.get(i);
+      int op;
+      if (item == Type.INT_TYPE) op = Opcodes.ILOAD;
+      else if (item == Type.LONG_TYPE) op = Opcodes.LLOAD;
+      else if (item == Type.FLOAT_TYPE) op = Opcodes.FLOAD;
+      else if (item == Type.DOUBLE_TYPE) op = Opcodes.DLOAD;
+      else op = Opcodes.ALOAD;
+      newMethod.visitVarInsn(op, i);
+    }
+    // Next set of instructions comes verbatim from the original, but we have to change the local indexes
+    for (int i = 0; i < splitPoint.length; i++) {
+      AbstractInsnNode insn = method.instructions.get(i + splitPoint.start);
+      if (insn instanceof VarInsnNode) {
+        insn = insn.clone(Collections.emptyMap());
+        ((VarInsnNode) insn).var = localsMap.get(((VarInsnNode) insn).var);
+      } else if (insn instanceof IincInsnNode) {
+        insn = insn.clone(Collections.emptyMap());
+        ((VarInsnNode) insn).var = localsMap.get(((VarInsnNode) insn).var);
+      }
+      newMethod.instructions.add(insn);
+    }
+    // Final set of instructions is an object array of stack to set and then locals written
 
     throw new UnsupportedOperationException("TODO: the rest");
   }

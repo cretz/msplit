@@ -27,14 +27,14 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
   public Iterator<SplitPoint> iterator() { return new Iter(); }
 
   public static class SplitPoint {
-    public final Set<Integer> localsRead;
-    public final Set<Integer> localsWritten;
+    public final SortedMap<Integer, Type> localsRead;
+    public final SortedMap<Integer, Type> localsWritten;
     public final List<Type> neededFromStackAtStart;
     public final List<Type> putOnStackAtEnd;
     public final int start;
     public final int length;
 
-    public SplitPoint(Set<Integer> localsRead, Set<Integer> localsWritten,
+    public SplitPoint(SortedMap<Integer, Type> localsRead, SortedMap<Integer, Type>localsWritten,
         List<Type> neededFromStackAtStart, List<Type> putOnStackAtEnd, int start, int length) {
       this.localsRead = localsRead;
       this.localsWritten = localsWritten;
@@ -246,8 +246,8 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
       for (int i = info.startIndex; i <= info.endIndex; i++) insns[i].accept(adapter);
       // Build the split point
       return new SplitPoint(
-          adapter.localsRead,
-          adapter.localsWritten,
+          localMapFromAdapterLocalMap(adapter.localsRead, adapter.uninitializedTypes),
+          localMapFromAdapterLocalMap(adapter.localsWritten, adapter.uninitializedTypes),
           typesFromAdapterStackRange(stackAtStart, adapter.lowestStackSize, adapter.uninitializedTypes),
           typesFromAdapterStackRange(adapter.stack, adapter.lowestStackSize, adapter.uninitializedTypes),
           info.startIndex,
@@ -255,20 +255,19 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
       );
     }
 
+    protected SortedMap<Integer, Type> localMapFromAdapterLocalMap(
+        SortedMap<Integer, Object> map, Map<Object, Object> uninitializedTypes) {
+      SortedMap<Integer, Type> ret = new TreeMap<>();
+      map.forEach((k, v) -> ret.put(k, typeFromAdapterStackItem(v, uninitializedTypes)));
+      return ret;
+    }
+
     protected List<Type> typesFromAdapterStackRange(
         List<Object> stack, int start, Map<Object, Object> uninitializedTypes) {
       List<Type> ret = new ArrayList<>();
       for (int i = start; i < stack.size(); i++) {
         Object item = stack.get(i);
-        if (item == Opcodes.INTEGER) ret.add(Type.INT_TYPE);
-        else if (item == Opcodes.FLOAT) ret.add(Type.FLOAT_TYPE);
-        else if (item == Opcodes.LONG) ret.add(Type.LONG_TYPE);
-        else if (item == Opcodes.DOUBLE) ret.add(Type.DOUBLE_TYPE);
-        else if (item == Opcodes.NULL) ret.add(Type.getType(Object.class));
-        else if (item == Opcodes.UNINITIALIZED_THIS) ret.add(Type.getObjectType(owner));
-        else if (item instanceof Label) ret.add(Type.getObjectType((String) uninitializedTypes.get(item)));
-        else if (item instanceof String) ret.add(Type.getObjectType((String) item));
-        else throw new IllegalStateException("Unrecognized stack item: " + item);
+        ret.add(typeFromAdapterStackItem(item, uninitializedTypes));
         // Jump an extra spot for longs and doubles
         if (item == Opcodes.LONG || item == Opcodes.DOUBLE) {
           if (stack.get(++i) != Opcodes.TOP) throw new IllegalStateException("Expected top after long/double");
@@ -276,12 +275,24 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
       }
       return ret;
     }
+
+    protected Type typeFromAdapterStackItem(Object item, Map<Object, Object> uninitializedTypes) {
+      if (item == Opcodes.INTEGER) return Type.INT_TYPE;
+      else if (item == Opcodes.FLOAT) return Type.FLOAT_TYPE;
+      else if (item == Opcodes.LONG) return Type.LONG_TYPE;
+      else if (item == Opcodes.DOUBLE) return Type.DOUBLE_TYPE;
+      else if (item == Opcodes.NULL) return Type.getType(Object.class);
+      else if (item == Opcodes.UNINITIALIZED_THIS) return Type.getObjectType(owner);
+      else if (item instanceof Label) return Type.getObjectType((String) uninitializedTypes.get(item));
+      else if (item instanceof String) return Type.getObjectType((String) item);
+      else throw new IllegalStateException("Unrecognized stack item: " + item);
+    }
   }
 
   protected static class StackAndLocalTrackingAdapter extends AnalyzerAdapter {
     public int lowestStackSize;
-    public final Set<Integer> localsRead = new TreeSet<>();
-    public final Set<Integer> localsWritten = new TreeSet<>();
+    public final SortedMap<Integer, Object> localsRead = new TreeMap<>();
+    public final SortedMap<Integer, Object> localsWritten = new TreeMap<>();
 
     protected StackAndLocalTrackingAdapter(Splitter splitter) {
       super(splitter.api, splitter.owner, splitter.method.access, splitter.method.name, splitter.method.desc, null);
@@ -293,30 +304,32 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
 
     @Override
     public void visitVarInsn(int opcode, int var) {
-      super.visitVarInsn(opcode, var);
       switch (opcode) {
         case Opcodes.ILOAD:
         case Opcodes.LLOAD:
         case Opcodes.FLOAD:
         case Opcodes.DLOAD:
         case Opcodes.ALOAD:
-          localsRead.add(var);
+          localsRead.put(var, locals.get(var));
           break;
         case Opcodes.ISTORE:
-        case Opcodes.LSTORE:
         case Opcodes.FSTORE:
-        case Opcodes.DSTORE:
         case Opcodes.ASTORE:
-          localsWritten.add(var);
+          localsWritten.put(var, stack.get(stack.size() - 1));
+          break;
+        case Opcodes.LSTORE:
+        case Opcodes.DSTORE:
+          localsWritten.put(var, stack.get(stack.size() - 2));
           break;
       }
+      super.visitVarInsn(opcode, var);
     }
 
     @Override
     public void visitIincInsn(int var, int increment) {
+      localsRead.put(var, Type.INT_TYPE);
+      localsWritten.put(var, Type.INT_TYPE);
       super.visitIincInsn(var, increment);
-      localsRead.add(var);
-      localsWritten.add(var);
     }
   }
 
