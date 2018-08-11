@@ -1,10 +1,14 @@
 package msplit;
 
+import org.objectweb.asm.Label;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
+import org.objectweb.asm.commons.AnalyzerAdapter;
 import org.objectweb.asm.tree.*;
 
 import java.util.*;
 
-public class Splitter implements Iterable<SplitPoint> {
+public class Splitter implements Iterable<Splitter.SplitPoint> {
   protected final int api;
   protected final String owner;
   protected final MethodNode method;
@@ -22,13 +26,32 @@ public class Splitter implements Iterable<SplitPoint> {
   @Override
   public Iterator<SplitPoint> iterator() { return new Iter(); }
 
+  public static class SplitPoint {
+    public final Set<Integer> localsRead;
+    public final Set<Integer> localsWritten;
+    public final List<Type> neededFromStackAtStart;
+    public final List<Type> putOnStackAtEnd;
+    public final int start;
+    public final int length;
+
+    public SplitPoint(Set<Integer> localsRead, Set<Integer> localsWritten,
+        List<Type> neededFromStackAtStart, List<Type> putOnStackAtEnd, int start, int length) {
+      this.localsRead = localsRead;
+      this.localsWritten = localsWritten;
+      this.neededFromStackAtStart = neededFromStackAtStart;
+      this.putOnStackAtEnd = putOnStackAtEnd;
+      this.start = start;
+      this.length = length;
+    }
+  }
+
   protected class Iter implements Iterator<SplitPoint> {
     protected final AbstractInsnNode[] insns;
     protected int currIndex = -1;
     protected boolean peeked;
     protected SplitPoint peekedValue;
 
-    public Iter() { insns = method.instructions.toArray(); }
+    protected Iter() { insns = method.instructions.toArray(); }
 
     @Override
     public boolean hasNext() {
@@ -53,7 +76,7 @@ public class Splitter implements Iterable<SplitPoint> {
       return ret;
     }
 
-    public SplitPoint nextOrNull() {
+    protected SplitPoint nextOrNull() {
       // Try for each index
       while (++currIndex + minSize <= insns.length) {
         SplitPoint longest = longestForCurrIndex();
@@ -62,7 +85,7 @@ public class Splitter implements Iterable<SplitPoint> {
       return null;
     }
 
-    public SplitPoint longestForCurrIndex() {
+    protected SplitPoint longestForCurrIndex() {
       // As a special case, if the previous insn was a line number, that was good enough
       if (currIndex - 1 >- 0 && insns[currIndex - 1] instanceof LineNumberNode) return null;
       // Build the info object
@@ -82,7 +105,7 @@ public class Splitter implements Iterable<SplitPoint> {
       return splitPointFromInfo(info);
     }
 
-    public void constrainEndByTryCatchBlocks(InsnTraverseInfo info) {
+    protected void constrainEndByTryCatchBlocks(InsnTraverseInfo info) {
       // If there are try blocks that the start is in, we can only go to the earliest block end
       for (TryCatchBlockNode block : method.tryCatchBlocks) {
         // No matter what, for now, we don't include catch handling
@@ -98,7 +121,7 @@ public class Splitter implements Iterable<SplitPoint> {
     }
 
     // Returns false if any jumps jump outside of the current range
-    public void constrainEndByInternalJumps(InsnTraverseInfo info) {
+    protected void constrainEndByInternalJumps(InsnTraverseInfo info) {
       for (int i = info.startIndex; i <= info.endIndex; i++) {
         AbstractInsnNode node = insns[i];
         int earliestIndex;
@@ -132,7 +155,7 @@ public class Splitter implements Iterable<SplitPoint> {
       }
     }
 
-    public void constrainEndByExternalJumps(InsnTraverseInfo info) {
+    protected void constrainEndByExternalJumps(InsnTraverseInfo info) {
       // Basically, if any external jumps jump into our range, that can't be included in the range
       for (int i = 0; i < insns.length; i++) {
         if (i >= info.startIndex && i <= info.endIndex) continue;
@@ -158,57 +181,123 @@ public class Splitter implements Iterable<SplitPoint> {
       }
     }
 
-    public SplitPoint splitPointFromInfo(InsnTraverseInfo info) {
+    protected SplitPoint splitPointFromInfo(InsnTraverseInfo info) {
       // We're going to use the analyzer adapter and run it for the up until the end, a step at a time
       StackAndLocalTrackingAdapter adapter = new StackAndLocalTrackingAdapter(Splitter.this);
       // Visit all of the insns up our start.
       // XXX: I checked the source of AnalyzerAdapter to confirm I don't need any of the surrounding stuff
       for (int i = 0; i < info.startIndex; i++) insns[i].accept(adapter);
       // Take the stack at the start and copy it off
-      Object[] stackAtStart = adapter.stack.toArray();
+      List<Object> stackAtStart = new ArrayList<>(adapter.stack);
       // Reset some adapter state
-      adapter.lowestStackSize = stackAtStart.length;
+      adapter.lowestStackSize = stackAtStart.size();
       adapter.localsRead.clear();
       adapter.localsWritten.clear();
       // Now go over the remaining range
       for (int i = info.startIndex; i <= info.endIndex; i++) insns[i].accept(adapter);
       // Build the split point
       return new SplitPoint(
-          adapter.localsRead.stream().mapToInt(i -> i).toArray(),
-          adapter.localsWritten.stream().mapToInt(i -> i).toArray(),
-          Arrays.copyOfRange(stackAtStart, adapter.lowestStackSize, stackAtStart.length),
-          Arrays.copyOfRange(adapter.stack.toArray(), adapter.lowestStackSize, adapter.stack.size()),
+          adapter.localsRead,
+          adapter.localsWritten,
+          typesFromAdapterStackRange(stackAtStart, adapter.lowestStackSize, adapter.uninitializedTypes),
+          typesFromAdapterStackRange(adapter.stack, adapter.lowestStackSize, adapter.uninitializedTypes),
           info.startIndex,
           info.getSize()
       );
     }
+
+    protected List<Type> typesFromAdapterStackRange(
+        List<Object> stack, int start, Map<Object, Object> uninitializedTypes) {
+      List<Type> ret = new ArrayList<>();
+      for (int i = start; i < stack.size(); i++) {
+        Object item = stack.get(i);
+        if (item == Opcodes.INTEGER) ret.add(Type.INT_TYPE);
+        else if (item == Opcodes.FLOAT) ret.add(Type.FLOAT_TYPE);
+        else if (item == Opcodes.LONG) ret.add(Type.LONG_TYPE);
+        else if (item == Opcodes.DOUBLE) ret.add(Type.DOUBLE_TYPE);
+        else if (item == Opcodes.NULL) ret.add(Type.getType(Object.class));
+        else if (item == Opcodes.UNINITIALIZED_THIS) ret.add(Type.getObjectType(owner));
+        else if (item instanceof Label) ret.add(Type.getObjectType((String) uninitializedTypes.get(item)));
+        else if (item instanceof String) ret.add(Type.getObjectType((String) item));
+        else throw new IllegalStateException("Unrecognized stack item: " + item);
+        // Jump an extra spot for longs and doubles
+        if (item == Opcodes.LONG || item == Opcodes.DOUBLE) {
+          if (stack.get(++i) != Opcodes.TOP) throw new IllegalStateException("Expected top after long/double");
+        }
+      }
+      return ret;
+    }
   }
 
   protected static class StackAndLocalTrackingAdapter extends AnalyzerAdapter {
-    public int lowestStackSize = 0;
+    public int lowestStackSize;
     public final Set<Integer> localsRead = new TreeSet<>();
     public final Set<Integer> localsWritten = new TreeSet<>();
 
     protected StackAndLocalTrackingAdapter(Splitter splitter) {
       super(splitter.api, splitter.owner, splitter.method.access, splitter.method.name, splitter.method.desc, null);
+      stack = new SizeChangeNotifyList<Object>() {
+        @Override
+        protected void onSizeChanged() { lowestStackSize = Math.min(lowestStackSize, size()); }
+      };
     }
 
     @Override
-    protected void onPop() { lowestStackSize = Math.min(lowestStackSize, stack.size() - 1); }
-
-    @Override
-    protected Object get(int local) {
-      localsRead.add(local);
-      return super.get(local);
+    public void visitVarInsn(int opcode, int var) {
+      super.visitVarInsn(opcode, var);
+      switch (opcode) {
+        case Opcodes.ILOAD:
+        case Opcodes.LLOAD:
+        case Opcodes.FLOAD:
+        case Opcodes.DLOAD:
+        case Opcodes.ALOAD:
+          localsRead.add(var);
+          break;
+        case Opcodes.ISTORE:
+        case Opcodes.LSTORE:
+        case Opcodes.FSTORE:
+        case Opcodes.DSTORE:
+        case Opcodes.ASTORE:
+          localsWritten.add(var);
+          break;
+      }
     }
 
     @Override
-    protected void set(int local, Object type) {
-      localsWritten.add(local);
-      super.set(local, type);
+    public void visitIincInsn(int var, int increment) {
+      super.visitIincInsn(var, increment);
+      localsRead.add(var);
+      localsWritten.add(var);
     }
   }
 
+  protected static class SizeChangeNotifyList<T> extends AbstractList<T> {
+    protected final ArrayList<T> list = new ArrayList<>();
+
+    protected void onSizeChanged() { }
+
+    @Override
+    public T get(int index) { return list.get(index); }
+
+    @Override
+    public int size() { return list.size(); }
+
+    @Override
+    public T set(int index, T element) { return list.set(index, element); }
+
+    @Override
+    public void add(int index, T element) {
+      list.add(index, element);
+      onSizeChanged();
+    }
+
+    @Override
+    public T remove(int index) {
+      T ret = list.remove(index);
+      onSizeChanged();
+      return ret;
+    }
+  }
 
   protected static class InsnTraverseInfo {
     public int startIndex;
