@@ -26,6 +26,7 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
   @Override
   public Iterator<SplitPoint> iterator() { return new Iter(); }
 
+  // Types are always int, float, long, double, or ref (no other primitives)
   public static class SplitPoint {
     public final SortedMap<Integer, Type> localsRead;
     public final SortedMap<Integer, Type> localsWritten;
