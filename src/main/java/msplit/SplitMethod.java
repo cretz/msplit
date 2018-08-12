@@ -1,6 +1,7 @@
 package msplit;
 
 
+import org.objectweb.asm.Label;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.*;
@@ -69,10 +70,13 @@ public class SplitMethod {
       newMethod.visitVarInsn(loadOpFromType(item), i);
     }
     // Next set of instructions comes verbatim from the original, but we have to change the local indexes
+    Set<Label> seenLabels = new HashSet<>();
     for (int i = 0; i < splitPoint.length; i++) {
       AbstractInsnNode insn = orig.instructions.get(i + splitPoint.start);
       // Skip frames
       if (insn instanceof FrameNode) continue;
+      // Store the label
+      if (insn instanceof LabelNode) seenLabels.add(((LabelNode) insn).getLabel());
       // Change the local if needed
       if (insn instanceof VarInsnNode) {
         insn = insn.clone(Collections.emptyMap());
@@ -126,8 +130,10 @@ public class SplitMethod {
     // Load the array out and return it
     newMethod.visitVarInsn(Opcodes.ALOAD, retArrLocalIndex);
     newMethod.visitInsn(Opcodes.ARETURN);
-    // Any try catch blocks that were completely within we re-add here
-    // TODO: Add try-catch blocks that were completely inside
+    // Any try catch blocks that start in here
+    for (TryCatchBlockNode tryCatch : orig.tryCatchBlocks) {
+      if (seenLabels.contains(tryCatch.start.getLabel())) tryCatch.accept(newMethod);
+    }
     // Reset the labels
     newMethod.instructions.resetLabels();
     return newMethod;
@@ -144,13 +150,16 @@ public class SplitMethod {
     orig.accept(newMethod);
     // Remove all insns, we'll re-add the ones outside the split range
     newMethod.instructions.clear();
-    // Remove all try catch blocks, we'll re-add them at the end
+    // Remove all try catch blocks and keep track of seen labels, we'll re-add them at the end
     newMethod.tryCatchBlocks.clear();
+    Set<Label> seenLabels = new HashSet<>();
     // Add the insns before split
     for (int i = 0; i < splitPoint.start; i++) {
       AbstractInsnNode insn = orig.instructions.get(i + splitPoint.start);
       // Skip frames
       if (insn instanceof FrameNode) continue;
+      // Record label
+      if (insn instanceof LabelNode) seenLabels.add(((LabelNode) insn).getLabel());
       insn.accept(newMethod);
     }
     // Push all the read locals on the stack
@@ -210,9 +219,14 @@ public class SplitMethod {
       AbstractInsnNode insn = orig.instructions.get(i + splitPoint.start);
       // Skip frames
       if (insn instanceof FrameNode) continue;
+      // Record label
+      if (insn instanceof LabelNode) seenLabels.add(((LabelNode) insn).getLabel());
       insn.accept(newMethod);
     }
-    // TODO: Add the try-catch blocks
+    // Add any try catch blocks that started in here
+    for (TryCatchBlockNode tryCatch : orig.tryCatchBlocks) {
+      if (seenLabels.contains(tryCatch.start.getLabel())) tryCatch.accept(newMethod);
+    }
     // Reset the labels
     newMethod.instructions.resetLabels();
     return newMethod;
