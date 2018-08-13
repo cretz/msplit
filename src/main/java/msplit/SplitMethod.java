@@ -8,6 +8,8 @@ import org.objectweb.asm.tree.*;
 
 import java.util.*;
 
+import static msplit.Util.*;
+
 public class SplitMethod {
 
   protected final int api;
@@ -54,8 +56,8 @@ public class SplitMethod {
     });
     // Create the new method
     MethodNode newMethod = new MethodNode(api,
-        Opcodes.ACC_STATIC & Opcodes.ACC_PRIVATE & Opcodes.ACC_SYNTHETIC, orig.name + "$split",
-        Type.getMethodDescriptor(Type.getType("[Ljava/lang/Object;"), args.toArray(new Type[0])), null, null);
+        Opcodes.ACC_STATIC + Opcodes.ACC_PRIVATE + Opcodes.ACC_SYNTHETIC, orig.name + "$split",
+        Type.getMethodDescriptor(Type.getType(Object[].class), args.toArray(new Type[0])), null, null);
     // Add the written locals to the map that are not already there
     int newLocalIndex = args.size();
     for (Integer key : splitPoint.localsWritten.keySet()) {
@@ -91,7 +93,7 @@ public class SplitMethod {
     // Create the object array
     int retArrSize = splitPoint.putOnStackAtEnd.size() + splitPoint.localsWritten.size();
     intConst(retArrSize).accept(newMethod);
-    newMethod.visitTypeInsn(Opcodes.ANEWARRAY, Type.getInternalName(Object.class));
+    newMethod.visitTypeInsn(Opcodes.ANEWARRAY, OBJECT_TYPE.getInternalName());
     // So, we're going to store the arr in the next avail local
     int retArrLocalIndex = newLocalIndex;
     newMethod.visitVarInsn(Opcodes.ASTORE, retArrLocalIndex);
@@ -153,6 +155,8 @@ public class SplitMethod {
     // Remove all try catch blocks and keep track of seen labels, we'll re-add them at the end
     newMethod.tryCatchBlocks.clear();
     Set<Label> seenLabels = new HashSet<>();
+    // Also keep track of the locals that have been stored, need to know
+    Set<Integer> seenStoredLocals = new HashSet<>();
     // Add the insns before split
     for (int i = 0; i < splitPoint.start; i++) {
       AbstractInsnNode insn = orig.instructions.get(i + splitPoint.start);
@@ -160,10 +164,17 @@ public class SplitMethod {
       if (insn instanceof FrameNode) continue;
       // Record label
       if (insn instanceof LabelNode) seenLabels.add(((LabelNode) insn).getLabel());
+      // Check a local store has happened
+      if (insn instanceof VarInsnNode && isStoreOp(insn.getOpcode())) seenStoredLocals.add(((VarInsnNode) insn).var);
       insn.accept(newMethod);
     }
     // Push all the read locals on the stack
-    splitPoint.localsRead.forEach((index, type) -> newMethod.visitVarInsn(loadOpFromType(type), index));
+    splitPoint.localsRead.forEach((index, type) -> {
+      // We've seen a store for this, so just load it, otherwise use a zero val
+      // TODO: safe? if not, maybe just put at the top of the method a bunch of defaulted locals?
+      if (seenStoredLocals.contains(index)) newMethod.visitVarInsn(loadOpFromType(type), index);
+      else zeroVal(type).accept(newMethod);
+    });
     // Invoke the split off method
     newMethod.visitMethodInsn(Opcodes.INVOKESTATIC, owner, splitOff.name, splitOff.desc, false);
     // Now the object array is on the stack which contains stack pieces + written locals
@@ -177,9 +188,9 @@ public class SplitMethod {
       localArrIndex++;
       // Load the written local
       Type item = splitPoint.localsWritten.get(index);
-      newMethod.visitInsn(arrLoadOpFromType(item));
+      newMethod.visitInsn(Opcodes.AALOAD);
       // Cast to local type
-      if (!"java/lang/Object".equals(item.getInternalName())) {
+      if (!item.equals(OBJECT_TYPE)) {
         newMethod.visitTypeInsn(Opcodes.CHECKCAST, boxedTypeIfNecessary(item).getInternalName());
       }
       // Unbox if necessary
@@ -196,9 +207,9 @@ public class SplitMethod {
       intConst(i).accept(newMethod);
       // Load the stack item
       Type item = splitPoint.putOnStackAtEnd.get(i);
-      newMethod.visitInsn(arrLoadOpFromType(item));
+      newMethod.visitInsn(Opcodes.AALOAD);
       // Cast to local type
-      if (!"java/lang/Object".equals(item.getInternalName())) {
+      if (!item.equals(OBJECT_TYPE)) {
         newMethod.visitTypeInsn(Opcodes.CHECKCAST, boxedTypeIfNecessary(item).getInternalName());
       }
       // Unbox if necessary
@@ -230,74 +241,6 @@ public class SplitMethod {
     // Reset the labels
     newMethod.instructions.resetLabels();
     return newMethod;
-  }
-
-  protected static int storeOpFromType(Type type) {
-    if (type == Type.INT_TYPE) return Opcodes.ISTORE;
-    else if (type == Type.LONG_TYPE) return Opcodes.LSTORE;
-    else if (type == Type.FLOAT_TYPE) return Opcodes.FSTORE;
-    else if (type == Type.DOUBLE_TYPE) return Opcodes.DSTORE;
-    else return Opcodes.ASTORE;
-  }
-
-  protected static int loadOpFromType(Type type) {
-    if (type == Type.INT_TYPE) return Opcodes.ILOAD;
-    else if (type == Type.LONG_TYPE) return Opcodes.LLOAD;
-    else if (type == Type.FLOAT_TYPE) return Opcodes.FLOAD;
-    else if (type == Type.DOUBLE_TYPE) return Opcodes.DLOAD;
-    else return Opcodes.ALOAD;
-  }
-
-  protected static int arrLoadOpFromType(Type type) {
-    if (type == Type.INT_TYPE) return Opcodes.IALOAD;
-    else if (type == Type.LONG_TYPE) return Opcodes.LALOAD;
-    else if (type == Type.FLOAT_TYPE) return Opcodes.FALOAD;
-    else if (type == Type.DOUBLE_TYPE) return Opcodes.DALOAD;
-    else return Opcodes.AALOAD;
-  }
-
-  protected static Type boxedTypeIfNecessary(Type type) {
-    if (type == Type.INT_TYPE) return Type.getType(Integer.class);
-    else if (type == Type.LONG_TYPE) return Type.getType(Long.class);
-    else if (type == Type.FLOAT_TYPE) return Type.getType(Float.class);
-    else if (type == Type.DOUBLE_TYPE) return Type.getType(Double.class);
-    else return type;
-  }
-
-  protected static void boxStackIfNecessary(Type type, MethodNode method) {
-    if (type == Type.INT_TYPE) boxCall(Integer.class, type).accept(method);
-    else if (type == Type.FLOAT_TYPE) boxCall(Float.class, type).accept(method);
-    else if (type == Type.LONG_TYPE) boxCall(Long.class, type).accept(method);
-    else if (type == Type.DOUBLE_TYPE) boxCall(Double.class, type).accept(method);
-  }
-
-  protected static void unboxStackIfNecessary(Type type, MethodNode method) {
-    if (type == Type.INT_TYPE) method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
-        "java/lang/Integer", "intValue", Type.getMethodDescriptor(Type.INT_TYPE), false);
-    else if (type == Type.FLOAT_TYPE) method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
-        "java/lang/Float", "floatValue", Type.getMethodDescriptor(Type.FLOAT_TYPE), false);
-    else if (type == Type.LONG_TYPE) method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
-        "java/lang/Long", "longValue", Type.getMethodDescriptor(Type.LONG_TYPE), false);
-    else if (type == Type.DOUBLE_TYPE) method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
-        "java/lang/Double", "doubleValue", Type.getMethodDescriptor(Type.DOUBLE_TYPE), false);
-  }
-
-  protected static AbstractInsnNode intConst(int v) {
-    switch (v) {
-      case -1: return new InsnNode(Opcodes.ICONST_M1);
-      case 0: return new InsnNode(Opcodes.ICONST_0);
-      case 1: return new InsnNode(Opcodes.ICONST_1);
-      case 2: return new InsnNode(Opcodes.ICONST_2);
-      case 3: return new InsnNode(Opcodes.ICONST_3);
-      case 4: return new InsnNode(Opcodes.ICONST_4);
-      case 5: return new InsnNode(Opcodes.ICONST_5);
-      default: return new LdcInsnNode(v);
-    }
-  }
-
-  protected static MethodInsnNode boxCall(Class<?> boxType, Type primType) {
-    return new MethodInsnNode(Opcodes.INVOKESTATIC, Type.getInternalName(boxType),
-        "valueOf", Type.getMethodDescriptor(Type.getType(boxType), primType), false);
   }
 
   public static class Result {

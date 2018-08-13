@@ -8,6 +8,8 @@ import org.objectweb.asm.tree.*;
 
 import java.util.*;
 
+import static msplit.Util.*;
+
 public class Splitter implements Iterable<Splitter.SplitPoint> {
   protected final int api;
   protected final String owner;
@@ -282,7 +284,7 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
       else if (item == Opcodes.FLOAT) return Type.FLOAT_TYPE;
       else if (item == Opcodes.LONG) return Type.LONG_TYPE;
       else if (item == Opcodes.DOUBLE) return Type.DOUBLE_TYPE;
-      else if (item == Opcodes.NULL) return Type.getType(Object.class);
+      else if (item == Opcodes.NULL) return OBJECT_TYPE;
       else if (item == Opcodes.UNINITIALIZED_THIS) return Type.getObjectType(owner);
       else if (item instanceof Label) return Type.getObjectType((String) uninitializedTypes.get(item));
       else if (item instanceof String) return Type.getObjectType((String) item);
