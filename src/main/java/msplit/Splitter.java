@@ -10,6 +10,7 @@ import java.util.*;
 
 import static msplit.Util.*;
 
+/** For a given method, iterate over possible split points */
 public class Splitter implements Iterable<Splitter.SplitPoint> {
   protected final int api;
   protected final String owner;
@@ -17,6 +18,13 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
   protected final int minSize;
   protected final int maxSize;
 
+  /**
+   * @param api Same as for {@link org.objectweb.asm.MethodVisitor#MethodVisitor(int)} or any other ASM class
+   * @param owner Internal name of the method's owner
+   * @param method The method to find split points for
+   * @param minSize The minimum number of instructions required for the split point to be valid
+   * @param maxSize The maximum number of instructions that split points cannot exceeed
+   */
   public Splitter(int api, String owner, MethodNode method, int minSize, int maxSize) {
     this.api = api;
     this.owner = owner;
@@ -29,12 +37,33 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
   public Iterator<SplitPoint> iterator() { return new Iter(); }
 
   // Types are always int, float, long, double, or ref (no other primitives)
+  /** A split point in a method that can be split off into another method */
   public static class SplitPoint {
+    /**
+     * The locals read in this split area, keyed by index. Value type is always int, float, long, double, or object.
+     */
     public final SortedMap<Integer, Type> localsRead;
+    /**
+     * The locals written in this split area, keyed by index. Value type is always int, float, long, double, or object.
+     */
     public final SortedMap<Integer, Type> localsWritten;
+    /**
+     * The values of the stack needed at the start of this split area. Type is always int, float, long, double, or
+     * object.
+     */
     public final List<Type> neededFromStackAtStart;
+    /**
+     * The values of the stack at the end of this split area that are needed to put back on the original. Type is always
+     * int, float, long, double, or object.
+     */
     public final List<Type> putOnStackAtEnd;
+    /**
+     * The instruction index this split area begins at.
+     */
     public final int start;
+    /**
+     * The number of instructions this split area has.
+     */
     public final int length;
 
     public SplitPoint(SortedMap<Integer, Type> localsRead, SortedMap<Integer, Type>localsWritten,
@@ -159,20 +188,9 @@ public class Splitter implements Iterable<Splitter.SplitPoint> {
         if (catchWithinDisallowed && info.startIndex <= handleIndex && info.endIndex >= handleIndex) {
           info.endIndex = Math.min(info.endIndex, handleIndex - 1);
         }
-        /*
-        TODO: this is what we used to do...
-        if (info.startIndex < handleIndex) info.endIndex = Math.min(info.endIndex, handleIndex);
-        // Now we can check the try-block range
-        int start = method.instructions.indexOf(block.start);
-        if (info.startIndex < start) continue;
-        int end = method.instructions.indexOf(block.end);
-        if (info.startIndex >= end) continue;
-        info.endIndex = Math.min(info.endIndex, end - 1);
-        */
       }
     }
 
-    // Returns false if any jumps jump outside of the current range
     protected void constrainEndByInternalJumps(InsnTraverseInfo info) {
       for (int i = info.startIndex; i <= info.endIndex; i++) {
         AbstractInsnNode node = insns[i];

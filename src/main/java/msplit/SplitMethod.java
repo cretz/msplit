@@ -10,12 +10,19 @@ import java.util.*;
 
 import static msplit.Util.*;
 
+/** Splits a method into two */
 public class SplitMethod {
 
   protected final int api;
 
+  /** @param api Same as for {@link org.objectweb.asm.MethodVisitor#MethodVisitor(int)} or any other ASM class */
   public SplitMethod(int api) { this.api = api; }
 
+  /**
+   * Calls {@link #split(String, MethodNode, int, int, int)} with minSize as 20% + 1 of the original, maxSize as
+   * 70% + 1 of the original, and firstAtLeast as maxSize. The original method is never modified and the result can
+   * be null if no split points are found.
+   */
   public Result split(String owner, MethodNode method) {
     // Between 20% + 1 and 70% + 1 of size
     int insnCount = method.instructions.size();
@@ -24,6 +31,21 @@ public class SplitMethod {
     return split(owner, method, minSize, maxSize, maxSize);
   }
 
+  /**
+   * Splits the given method into two. This uses a {@link Splitter} to consistently create
+   * {@link msplit.Splitter.SplitPoint}s until one reaches firstAtLeast or the largest otherwise, and then calls
+   * {@link #fromSplitPoint(String, MethodNode, Splitter.SplitPoint)}.
+   *
+   * @param owner The internal name of the owning class. Needed when splitting to call the split off method.
+   * @param method The method to split, never modified
+   * @param minSize The minimum number of instructions the split off method must have
+   * @param maxSize The maximum number of instructions the split off method can have
+   * @param firstAtLeast The number of instructions that, when first reached, will immediately be used without
+   *                     continuing. Since split points are streamed, this allows splitting without waiting to
+   *                     find the largest overall. If this is &lt= 0, it will not apply and all split points will be
+   *                     checked to find the largest before doing the split.
+   * @return The resulting split method or null if there were no split points found
+   */
   public Result split(String owner, MethodNode method, int minSize, int maxSize, int firstAtLeast) {
     // Get the largest split point
     Splitter.SplitPoint largest = null;
@@ -38,6 +60,10 @@ public class SplitMethod {
     return fromSplitPoint(owner, method, largest);
   }
 
+  /**
+   * Split the given method at the given split point. Called by {@link #split(String, MethodNode, int, int, int)}. The
+   * original method is never modified.
+   */
   public Result fromSplitPoint(String owner, MethodNode orig, Splitter.SplitPoint splitPoint) {
     MethodNode splitOff = createSplitOffMethod(orig, splitPoint);
     MethodNode trimmed = createTrimmedMethod(owner, orig, splitOff, splitPoint);
@@ -243,8 +269,11 @@ public class SplitMethod {
     return newMethod;
   }
 
+  /** Result of a split method */
   public static class Result {
+    /** A copy of the original method, but changed to invoke {@link #splitOffMethod} */
     public final MethodNode trimmedMethod;
+    /** The new method that was split off the original and is called by {@link #splitOffMethod} */
     public final MethodNode splitOffMethod;
 
     public Result(MethodNode trimmedMethod, MethodNode splitOffMethod) {
