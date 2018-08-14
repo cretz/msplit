@@ -1,10 +1,10 @@
 # MSplit
 
 MSplit splits JVM methods that are too large. Often in [ASM](https://asm.ow2.io/) when compiling for the JVM, the method
-will be too large, giving the "Method code too large!" exception. The JVM is limits method sizes to 64k. This project
+will be too large, giving the "Method code too large!" exception. The JVM is limited method sizes to 64k. This project
 helps get around that.
 
-While the goal is similar to https://bitbucket.org/sperber/asm-method-size, it is much simpler in practice. While it
+While the goal is similar to https://bitbucket.org/sperber/asm-method-size, it is much simpler in practice. Although it
 should work for most use cases in theory, not very many of the quirks have been tested. Please report any issues and
 hopefully a test case can be written to try it.
 
@@ -13,17 +13,18 @@ hopefully a test case can be written to try it.
 Since the code in this repository is only a few files, it was decided not to put it on Maven Central but instead
 encourage developers to shade/vendor/embed the code in their own project by just moving the files.
 
-The common way to method is to use `msplit.SplitMethod#split` which accepts the internal class name of the
+The common way to split a method is to use `msplit.SplitMethod#split` which accepts the internal class name of the
 method, an ASM `MethodNode` to split, `minSize`, `maxSize`, and `atLeastFirst` parameters. `minSize` is the minimum
 number of instructions that must be split off, `maxSize` is the maximum number of instructions that can be split off,
-and `atLeastFirst` is the number of instructions that, when reached, will be considered the valid set and splitting done
+and `atLeastFirst` is the number of instructions that, when first reached, will be considered the valid set to be used
 immediately. If `atLeastFirst` is &lt;= 0, the entire set of split points is checked to find the largest within min/max.
 An overload of `split` exists that defaults `minSize` to 20% + 1, `maxSize` to 70% + 1, and `atLeastFirst` as the
-`maxSize`. The original method is not changed during this process.
+`maxSize`.
 
 This method returns a `Result` which contains the `splitOffMethod`, which is the new method split off from the original,
-and `trimmedMethod`, which is the original changed to call the split off method. The method uses the `msplit.Splitter`
-class which is an iterator over `msplit.Splitter.SplitPoint` classes which continually return split point possibilities.
+and `trimmedMethod`, which is the original changed to call the split off method. The original method is left untouched.
+The method uses the `msplit.Splitter` class which is an iterator over `msplit.Splitter.SplitPoint` classes which
+continually return split point possibilities.
 
 The two created methods have all their frames removed and maxs invalid, so when writing with ASM, make sure the class
 writer is set to compute frames and maxs.
@@ -31,7 +32,7 @@ writer is set to compute frames and maxs.
 ## How it Works
 
 The algorithm is takes two steps: the first finds valid "split points" where a section of code can be taken out of the
-original and put into another method (in `msplit.Splitter`, and the second which uses a split point to do the actual
+original and put into another method (in `msplit.Splitter`), and the second which uses a split point to do the actual
 splitting (in `msplit.SplitMethod`).
 
 The `msplit.Splitter` algorithm is an iterator that iterates over potential split points constrained by a user-supplied
@@ -85,6 +86,8 @@ To create the trimmed method, the method sans instructions and try/catch blocks 
       approach to determine uninitialized locals.
 1. Invokes the split off method, which pops/uses the stack then the pushed locals as parameters
 1. Takes the result of the split-off method (the object array) and writes the locals back that were changed
-1. Then pushes back on the stack the stack portion of the object array
+1. Pushes back on the stack the stack portion of the object array
+1. Uses all normal instructions after the split point
+1. Adds back all try-catch blocks not fully contained within the split point
 
 There is more complication than this, but the general idea is here.
