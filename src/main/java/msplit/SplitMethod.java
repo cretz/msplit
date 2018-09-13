@@ -183,6 +183,8 @@ public class SplitMethod {
     Set<Label> seenLabels = new HashSet<>();
     // Also keep track of the locals that have been stored, need to know
     Set<Integer> seenStoredLocals = new HashSet<>();
+    // If this is an instance method, we consider "0" (i.e. "this") as seen
+    if ((orig.access & Opcodes.ACC_STATIC) == 0) seenStoredLocals.add(0);
     // Add the insns before split
     for (int i = 0; i < splitPoint.start; i++) {
       AbstractInsnNode insn = orig.instructions.get(i + splitPoint.start);
